@@ -39,7 +39,7 @@ class DefaultMultiPaneComponent(
             onSignIn = onSignIn,
         )
 
-    override val sessionDetails: Value<ChildSlot<*, SessionDetailsComponent>> =
+    private val _sessionDetails: Value<ChildSlot<SessionDetailsConfig, SessionDetailsComponent>> =
         childSlot(source = sessionDetailsNavigation) { config, childComponentContext ->
             DefaultSessionDetailsComponent(
                 componentContext = childComponentContext,
@@ -51,6 +51,14 @@ class DefaultMultiPaneComponent(
                 onSpeakerSelected = onSpeakerSelected,
             )
         }
+
+    override val sessionDetails: Value<ChildSlot<*, SessionDetailsComponent>> = _sessionDetails
+
+    init {
+        _sessionDetails.subscribe {
+            sessions.onSessionSelectionChanged(id = it.child?.configuration?.sessionId)
+        }
+    }
 
     @Parcelize
     private data class SessionDetailsConfig(

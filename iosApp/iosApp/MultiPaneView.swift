@@ -26,10 +26,12 @@ struct MultiPaneView: View {
                 SessionsView(component.sessions)
                     .frame(width: geometry.size.width * 0.3)
                 
-                let sessionDetailsComponent = sessionDetails.child?.instance
-                if sessionDetailsComponent != nil {
-                    SessionDetailsView(sessionDetailsComponent!)
+                let sessionDetailsChild = sessionDetails.child
+                if sessionDetailsChild != nil {
+                    SessionDetailsView(sessionDetailsChild!.instance)
                         .frame(width: geometry.size.width * 0.7)
+                        .transition(.opacity.animation(.easeInOut(duration: 0.25)))
+                        .id(sessionDetailsChild!.configuration.hash)
                 }
             }
         }
