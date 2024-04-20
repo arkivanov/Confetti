@@ -2,8 +2,10 @@
 
 package dev.johnoreilly.confetti
 
+import android.app.Activity
 import android.app.TaskStackBuilder
 import android.content.Intent
+import android.net.Uri
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -14,6 +16,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import androidx.core.os.bundleOf
 import androidx.core.view.WindowCompat
 import androidx.credentials.ClearCredentialStateRequest
 import androidx.credentials.CredentialManager
@@ -31,6 +34,44 @@ import dev.johnoreilly.confetti.ui.component.ConfettiBackground
 import kotlinx.coroutines.launch
 import org.koin.android.ext.android.inject
 
+fun <T : Any> ComponentActivity.withDeepLink(block: (deepLink: Uri?) -> T): T? {
+    if (restartIfNeeded()) {
+        return null
+    }
+
+    val savedState: Bundle? = savedStateRegistry.consumeRestoredStateForKey(key = KEY_SAVED_DEEP_LINK_STATE)
+    val lastDeepLink = savedState?.getParcelable(KEY_LAST_DEEP_LINK) as Uri?
+    val deepLink = intent.data
+
+    savedStateRegistry.registerSavedStateProvider(key = KEY_SAVED_DEEP_LINK_STATE) {
+        bundleOf(KEY_LAST_DEEP_LINK to deepLink)
+    }
+
+    return block(deepLink.takeUnless { it == lastDeepLink })
+}
+
+// Derived from https://cs.android.com/androidx/platform/frameworks/support/+/androidx-main:navigation/navigation-runtime/src/main/java/androidx/navigation/NavController.kt;l=1487-1504?q=Intent.flags&ss=androidx%2Fplatform%2Fframeworks%2Fsupport:navigation%2F
+private fun Activity.restartIfNeeded(): Boolean {
+    if ((intent.flags and Intent.FLAG_ACTIVITY_NEW_TASK == 0) || (intent.flags and Intent.FLAG_ACTIVITY_CLEAR_TASK != 0)) {
+        return false
+    }
+
+    // Someone called us with NEW_TASK, but we don't know what state our whole
+    // task stack is in, so we need to manually restart the whole stack to
+    // ensure we're in a predictably good state.
+
+    intent.addFlags(Intent.FLAG_ACTIVITY_CLEAR_TASK)
+    TaskStackBuilder.create(this).addNextIntentWithParentStack(intent).startActivities()
+    finish()
+    // Disable second animation in case where the Activity is created twice.
+    @Suppress("DEPRECATION")
+    overridePendingTransition(0, 0)
+
+    return true
+}
+
+private const val KEY_SAVED_DEEP_LINK_STATE = "SAVED_DEEP_LINK_STATE"
+private const val KEY_LAST_DEEP_LINK = "LAST_DEEP_LINK"
 
 class MainActivity : ComponentActivity() {
 
@@ -58,29 +99,27 @@ class MainActivity : ComponentActivity() {
         // including IME animations
         WindowCompat.setDecorFitsSystemWindows(window, false)
 
-        isDeepLinkHandledPreviously = savedInstanceState?.getBoolean(KEY_DEEP_LINK_HANDLED) ?: false
-        val initialConferenceId = extractConferenceIdOrNull(intent, isDeepLinkHandledPreviously)
-        if (initialConferenceId != null) {
-            intent.setData(null)
-            isDeepLinkHandledPreviously = true
-        }
         val appComponent =
-            DefaultAppComponent(
-                componentContext = defaultComponentContext(
-                    discardSavedState = initialConferenceId != null,
-                ),
-                initialConferenceId = initialConferenceId,
-                onSignOut = {
-                    lifecycleScope.launch {
-                        credentialManager.clearCredentialState(ClearCredentialStateRequest())
+            withDeepLink { deepLink: Uri? ->
+                val conferenceId = deepLink?.extractConferenceIdOrNull()
+
+                DefaultAppComponent(
+                    componentContext = defaultComponentContext(
+                        discardSavedState = conferenceId != null,
+                    ),
+                    initialConferenceId = conferenceId,
+                    onSignOut = {
+                        lifecycleScope.launch {
+                            credentialManager.clearCredentialState(ClearCredentialStateRequest())
+                        }
+                    },
+                    onSignIn = {
+                        lifecycleScope.launch {
+                            signIn(this@MainActivity, authentication)
+                        }
                     }
-                },
-                onSignIn = {
-                    lifecycleScope.launch {
-                        signIn(this@MainActivity, authentication)
-                    }
-                }
-            )
+                )
+            } ?: return
 
         setContent {
             val windowSizeClass = calculateWindowSizeClass(this)
@@ -105,39 +144,16 @@ class MainActivity : ComponentActivity() {
      * In case we were asked to create a new task with [Intent.FLAG_ACTIVITY_NEW_TASK] it clears the entire activity
      * and starts a new one to be in a predictably good state
      */
-    private fun extractConferenceIdOrNull(intent: Intent, isDeepLinkHandledPreviously: Boolean): String? {
-        val flags = intent.flags
-        if (flags and Intent.FLAG_ACTIVITY_NEW_TASK != 0 && flags and Intent.FLAG_ACTIVITY_CLEAR_TASK == 0) {
-            // From:
-            // https://cs.android.com/androidx/platform/frameworks/support/+/androidx-main:navigation/navigation-runtime/src/main/java/androidx/navigation/NavController.kt;l=1487-1504?q=Intent.flags&ss=androidx%2Fplatform%2Fframeworks%2Fsupport:navigation%2F
-            // Someone called us with NEW_TASK, but we don't know what state our whole
-            // task stack is in, so we need to manually restart the whole stack to
-            // ensure we're in a predictably good state.
-            intent.addFlags(Intent.FLAG_ACTIVITY_CLEAR_TASK)
-            val taskStackBuilder = TaskStackBuilder
-                .create(this@MainActivity)
-                .addNextIntentWithParentStack(intent)
-            taskStackBuilder.startActivities()
-            this.finish()
-            // Disable second animation in case where the Activity is created twice.
-            @Suppress("DEPRECATION")
-            this.overridePendingTransition(0, 0)
-            return null
-        }
-        if (isDeepLinkHandledPreviously) {
-            return null
-        }
-        with(intent.data ?: return null) {
-            if (host != "confetti-app.dev") return null
-            val path = path ?: return null
-            if (path.firstOrNull() != '/') return null
-            val parts = path.substring(1).split('/')
-            if (parts.size != 2) return null
-            if (parts[0] != "conference") return null
-            val conferenceId = parts[1]
-            if (!conferenceId.all { it.isLetterOrDigit() }) return null
-            return conferenceId
-        }
+    private fun Uri.extractConferenceIdOrNull(): String? {
+        if (host != "confetti-app.dev") return null
+        val path = path ?: return null
+        if (path.firstOrNull() != '/') return null
+        val parts = path.substring(1).split('/')
+        if (parts.size != 2) return null
+        if (parts[0] != "conference") return null
+        val conferenceId = parts[1]
+        if (!conferenceId.all { it.isLetterOrDigit() }) return null
+        return conferenceId
     }
 
     override fun onSaveInstanceState(outState: Bundle) {
